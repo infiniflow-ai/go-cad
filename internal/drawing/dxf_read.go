@@ -162,8 +162,8 @@ func (st *DxfState) skipToEndSec() error {
 // ---- HEADER 段 ----
 
 // parseHeader 头部变量：$ACADVER（版本枚举）与 $DWGCODEPAGE（码页），
-// 其余键从略。读到码页后，pre-R13（R12 及更早）的 DXF 文本按该码页
-// 解码（复用 DWG 侧 decodeCodepage，GBK 等；R13+ 文本保持字节直读）。
+// 其余键从略。R13–R2004 的 DXF 文本按声明码页解码；R2007+ 按 UTF-8
+// 直读（$DWGCODEPAGE 仍可能写着 ANSI_1252，但不能二次解码）。
 func (st *DxfState) parseHeader() error {
 	for {
 		p, ok, err := st.lexer.next()
@@ -171,10 +171,12 @@ func (st *DxfState) parseHeader() error {
 			return err
 		}
 		if !ok {
+			st.applyCodepage()
 			return nil
 		}
 		if p.Code == 0 {
 			if p.strValue() == "ENDSEC" {
+				st.applyCodepage()
 				return nil
 			}
 			continue
@@ -207,11 +209,14 @@ func (st *DxfState) parseHeader() error {
 	}
 }
 
-// applyCodepage HEADER 键就绪后同步词法层码页：仅 pre-R13（R12 系）
-// 应用——R13+ 的 DXF 文本不走码页；未知码页（0）显式禁用（字节直读）。
+// applyCodepage 头部键就绪后同步词法层码页：pre-R13（R12 系）与
+// R13–R2004 的 DXF 文本按声明码页解码；R2007+ 是 UTF-8，显式关闭
+// 码页（未知码页 0 同样保持字节直读）。
 func (st *DxfState) applyCodepage() {
-	if st.Doc.Ver.PreR13() {
+	if st.Doc.Ver.PreR13() || st.Doc.Ver <= container.VerR2004 {
 		st.lexer.cp = st.Doc.Codepage
+	} else {
+		st.lexer.cp = 0
 	}
 }
 
