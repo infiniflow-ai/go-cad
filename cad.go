@@ -152,3 +152,9 @@ func DebugScanGoldLines(data []byte, gold map[uint64][6]float64) []string {
 func DebugObjectBody(data []byte, handle uint64) (body []byte, bitOffset uint64, err error) {
 	return drawing.DebugObjectBody(data, handle)
 }
+
+// TextLayout holds drawing text and its bounds in a single coordinate space.
+type TextLayout = render.TextLayout
+
+// TextLayouts extracts model and paper-space text without mixing their coordinates.
+func TextLayouts(doc *Document) []TextLayout { return render.TextLayouts(doc) }

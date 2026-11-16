@@ -115,3 +115,31 @@ func TestSheetViewportMargin(t *testing.T) {
 		}
 	}
 }
+
+func TestSheetContentBoundsIncludesPartialTextCluster(t *testing.T) {
+	var prims []drawing.Primitive
+	for i := 0; i < 100; i++ {
+		prims = append(prims, drawing.Primitive{Kind: 0, Strokes: []drawing.Stroke{{float64(i), float64(i), float64(i) + 1, float64(i) + 1}}})
+	}
+	for _, x := range []float64{30, 300} {
+		prims = append(prims, drawing.Primitive{Kind: 1, Lb: drawing.Label{X: x, Y: 30, Tx: &drawing.GlyphTextInfo{Ux: 1, HWorld: 5}}})
+	}
+	b := sheetContentBounds(prims)
+	for _, point := range [][2]float64{{10, 10}, {90, 90}, {30, 30}, {300, 30}} {
+		if !pointInBox(point[0], point[1], b) {
+			t.Errorf("bounds %+v exclude content %v", b, point)
+		}
+	}
+}
+
+func TestSheetContentBoundsRejectsDistantTextOutlier(t *testing.T) {
+	doc := buildFarGeometryDoc(-950, -950)
+	doc.ModelSpace = append(doc.ModelSpace, &entity.EntText{Text: "outlier", Insertion: entity.Point3{X: 1e8, Y: 1e8}, Height: 10})
+	b := sheetContentBounds(prepareSheets(doc).prims)
+	if b.MaxX > 0 || b.MaxY > 0 {
+		t.Fatalf("distant text inflated viewport: %+v", b)
+	}
+	if !pointInBox(-950, -950, b) {
+		t.Fatalf("local text excluded: %+v", b)
+	}
+}

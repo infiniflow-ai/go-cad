@@ -19,12 +19,14 @@ import (
 
 // SheetText 单条图纸文本及其图框归属（docling 集成的文本导出单元）。
 type SheetText struct {
-	Text     string  // 文本内容（MTEXT 已剥离格式码，多行以 \n 连接）
-	X, Y     float64 // 插入点世界坐标（块内文本已经 INSERT 变换到世界系）
-	Height   float64 // 世界字高（含块引用缩放，与渲染清晰度自检同口径）
-	Rotation float64 // 基线旋转角（度，0~360；含块引用旋转与镜像后的实际方向）
-	Layer    string  // 图层名（层表解析失败或未知名时为空串，不阻塞导出）
-	Sheet    int     // 所属图框序号：1-based 对应 DetectSheets 输出顺序；0=不在任何图框内
+	Text     string     // 文本内容（MTEXT 已剥离格式码，多行以 \n 连接）
+	X, Y     float64    // 插入点世界坐标（块内文本已经 INSERT 变换到世界系）
+	Height   float64    // 世界字高（含块引用缩放，与渲染清晰度自检同口径）
+	Rotation float64    // 基线旋转角（度，0~360；含块引用旋转与镜像后的实际方向）
+	Layer    string     // 图层名（层表解析失败或未知名时为空串，不阻塞导出）
+	Bounds   [4]float64 // Native world-coordinate bounds used by the renderer.
+	Handle   uint64     // Source entity handle; instances also need their world position.
+	Sheet    int        // 所属图框序号：1-based 对应 DetectSheets 输出顺序；0=不在任何图框内
 }
 
 // SheetTexts 收集文档全部文本并按图框归属。sheets 为 DetectSheets 的输出
@@ -43,6 +45,10 @@ func SheetTexts(doc *drawing.Document, sheets []Sheet) []SheetText {
 	}
 	ts := drawing.NewTessellator(doc)
 	prims := ts.ExpandAll()
+	return textsFromPrimitives(doc, prims, sheets)
+}
+
+func textsFromPrimitives(doc *drawing.Document, prims []drawing.Primitive, sheets []Sheet) []SheetText {
 	out := make([]SheetText, 0, len(prims)/4+1)
 	for i := range prims {
 		p := &prims[i]
@@ -56,8 +62,11 @@ func SheetTexts(doc *drawing.Document, sheets []Sheet) []SheetText {
 		// 世界字高与 sheetWidthFor/sheetTitle 同口径：推进基向量模长
 		//（含块变换比例）× 局部字高
 		h := math.Hypot(p.Lb.Tx.Ux, p.Lb.Tx.Uy) * p.Lb.Tx.HWorld
+		b := drawing.PrimitivesBounds([]drawing.Primitive{*p})
 		out = append(out, SheetText{
+			Bounds:   [4]float64{b.MinX, b.MinY, b.MaxX, b.MaxY},
 			Text:     text,
+			Handle:   p.Lb.Handle,
 			X:        p.Lb.X,
 			Y:        p.Lb.Y,
 			Height:   h,

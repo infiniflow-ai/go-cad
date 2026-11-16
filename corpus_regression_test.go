@@ -109,11 +109,8 @@ func TestCorpusRegression(t *testing.T) {
 			if rows > 0 && unknown > 0 {
 				t.Errorf("%s: %d/%d dump rows are UNKNOWN", name, unknown, rows)
 			}
-			if inside >= 0 && len(texts) > 0 && inside == 0 {
-				t.Errorf("%s: text-aware fallback put 0/%d texts inside the viewport", name, len(texts))
-			}
-			if strings.Contains(entry.Name(), "apartment_floor_plan") && inside >= 0 && inside != len(texts) {
-				t.Errorf("%s: apartment regression: %d/%d texts inside the viewport", name, inside, len(texts))
+			if inside >= 0 && inside != len(texts) {
+				t.Errorf("%s: text-aware fallback put %d/%d texts inside the viewport", name, inside, len(texts))
 			}
 			if strings.Contains(entry.Name(), "apartment_floor_plan") && !hasM2 {
 				t.Errorf("%s: codepage regression: no text contains m²", name)

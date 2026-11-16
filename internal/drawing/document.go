@@ -516,6 +516,7 @@ func sortHandles(hs []uint64) {
 
 // stripMTextFormat 剥离 MTEXT 行内格式控制码（\\P 换行、{...} 分组、\\X 等）。
 func StripMTextFormat(s string) string {
+	s = expandUnicodeEscapes(s)
 	var buf bytes.Buffer
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -532,7 +533,7 @@ func StripMTextFormat(s string) string {
 			case 'X': // 列分隔
 				buf.WriteByte(' ')
 				i++
-			case 'A', 'C', 'c', 'F', 'f', 'H', 'L', 'l', 'O', 'o', 'Q', 'S', 'T', 'W':
+			case 'A', 'C', 'c', 'F', 'f', 'H', 'L', 'l', 'O', 'o', 'Q', 'S', 'T', 'W', 'p':
 				// 带参数指令：跳过指令字符与其参数（到 ';' 结束）
 				i++
 				for i < len(s) && s[i] != ';' {
