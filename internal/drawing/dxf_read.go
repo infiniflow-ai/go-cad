@@ -1192,9 +1192,15 @@ func dxfDegToRad(deg float64) float64 { return deg * math.Pi / 180 }
 // 10 恒为 def 点（gold ex2000 h=43B 仲裁）；ORDINATE 的 13/14 为
 // feature_location/leader_end（直接载入 point13/14，与 JSON 侧同口径）。
 // DIMENSION 走显式组码字段，无 dimSpecificLayout 位流布局问题；
-// dimstyle 名（组码 3）与匿名块名（组码 2）无句柄对应，不恢复句柄引用。
+// dimstyle 名（组码 3）无句柄对应；匿名块名（组码 2）按 BLOCKS 段名字表
+// 解析为句柄，交由渲染展开匿名块，避免退化成测量点连线。
 func (st *DxfState) buildDimension(rec *DxfRec, base *entity.BaseEntity) any {
 	d := &entity.EntDimension{BaseEntity: *base}
+	if name := rec.str(2); name != "" {
+		if h, ok := st.BlockByName[name]; ok {
+			d.AnonymousBlock = h
+		}
+	}
 	flag, _ := rec.intVal(70)
 	d.DimFlag = uint8(flag & 0xFF)
 	d.DimFlags = d.DimFlag // DXF 无独立 flag1 位流，审计口径以 flag 为准
