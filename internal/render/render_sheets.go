@@ -1615,6 +1615,17 @@ func hasTextPrimitive(prims []drawing.Primitive) bool {
 	return false
 }
 
+// hasTextInBox 视口内是否有可渲染文本。
+func hasTextInBox(prims []drawing.Primitive, b drawing.Box2) bool {
+	for i := range prims {
+		p := &prims[i]
+		if p.Kind == 1 && p.Lb.Tx != nil && drawing.Plausible(p.Lb.X, p.Lb.Y) && pointInBox(p.Lb.X, p.Lb.Y, b) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveRenderBounds 解析整图渲染视口：显式 Box 优先，否则走文本感知的
 // 稳健包围盒。Box 退化（零宽/零高）时回退自动口径。
 func resolveRenderBounds(prims []drawing.Primitive, box *[4]float64) drawing.Box2 {
@@ -1762,6 +1773,14 @@ func (sp *sheetPipeline) renderPNG(sheet Sheet, opts RenderOptions) ([]byte, int
 	rate := sheetTextPassRate(sp.prims, vp, float64(width)/vw)
 	rerenders := 0
 	if opts.Width > 0 {
+		return data, width, rate, rerenders, nil
+	}
+	// 视口内没有任何文本（但文档本身有文本）时，放大宽度不会把文字拉回
+	// 视口，只会白白重渲；保留首张并告警，视口错误交给调用方修。
+	if !hasTextInBox(sp.prims, vp) && hasTextPrimitive(sp.prims) {
+		fmt.Fprintf(sheetStdout,
+			"cad: 警告 图框 %q 视口内没有文本（文档含文本），跳过清晰度重渲；请检查视口或 RenderOptions.Box\n",
+			sheet.Name)
 		return data, width, rate, rerenders, nil
 	}
 	for rate < sheetPassRateMin && width < sheetHardMaxWidth {
