@@ -720,11 +720,12 @@ func (st *DxfState) dxfBase(rec *DxfRec, mode uint8, owner uint64) *entity.BaseE
 		}
 	}
 	return &entity.BaseEntity{
-		Handle: st.RecordHandle(rec),
-		Color:  dxfEntityColor(rec),
-		Layer:  st.layerHandle(rec.str(8)),
-		Owner:  owner,
-		Mode:   mode,
+		Handle:   st.RecordHandle(rec),
+		Color:    dxfEntityColor(rec),
+		Layer:    st.layerHandle(rec.str(8)),
+		Owner:    owner,
+		Mode:     mode,
+		TypeName: rec.Typ,
 	}
 }
 
@@ -1210,6 +1211,24 @@ func (st *DxfState) buildDimension(rec *DxfRec, base *entity.BaseEntity) any {
 	d.DimFlag = uint8(flag & 0xFF)
 	d.DimFlags = d.DimFlag // DXF 无独立 flag1 位流，审计口径以 flag 为准
 	sub := d.DimFlag & 0x7
+	// 与 DWG 解码共用内部短名：DimGoldEntityName 再把 DIM_* 映射成
+	// DIMENSION_* 的 gold 键；写出端的类型码表同样使用 DIM_*。
+	switch sub {
+	case 0:
+		d.TypeName = "DIM_LINEAR"
+	case 1:
+		d.TypeName = "DIM_ALIGNED"
+	case 2:
+		d.TypeName = "DIM_ANG2LN"
+	case 3:
+		d.TypeName = "DIM_DIAMETER"
+	case 4:
+		d.TypeName = "DIM_RADIUS"
+	case 5:
+		d.TypeName = "DIM_ANG3PT"
+	case 6:
+		d.TypeName = "DIM_ORDINATE"
+	}
 	// 公共段
 	// 10 组码恒为 def 点（DWG 侧 point10 载体，含 ANG2LN——gold 仲裁：
 	// ex2000 h=43B 的 DXF 10 与 gold xline2end_pt 一致，16 与 def_pt 一致）
