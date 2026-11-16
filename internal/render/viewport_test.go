@@ -119,7 +119,7 @@ func TestSheetViewportMargin(t *testing.T) {
 func TestSheetContentBoundsIncludesPartialTextCluster(t *testing.T) {
 	var prims []drawing.Primitive
 	for i := 0; i < 100; i++ {
-		prims = append(prims, drawing.Primitive{Kind: 0, Strokes: []drawing.Stroke{{float64(i), float64(i), float64(i) + 1, float64(i) + 1}}})
+		prims = append(prims, drawing.Primitive{Kind: 0, Strokes: []drawing.Stroke{{X1: float64(i), Y1: float64(i), X2: float64(i) + 1, Y2: float64(i) + 1}}})
 	}
 	for _, x := range []float64{30, 300} {
 		prims = append(prims, drawing.Primitive{Kind: 1, Lb: drawing.Label{X: x, Y: 30, Tx: &drawing.GlyphTextInfo{Ux: 1, HWorld: 5}}})
