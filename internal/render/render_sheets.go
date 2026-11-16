@@ -1559,11 +1559,9 @@ func textClusterBounds(prims []drawing.Primitive, tb drawing.Box2) (drawing.Box2
 	return out, found
 }
 
-// sheetContentBounds 兜底整图的稳健包围盒：
-//   - 分位/主分量框已覆盖大部分文本时保持原口径（边缘字形微出框不算错）；
-//   - 文本大部分落在框外时，改用文字所在的内容簇；
-//   - 远离几何框超过 10 倍跨度的文本视为错位/离群标注，不参与决策，
-//     否则单个天文坐标文本会把视口拉到整张图之外。
+// sheetContentBounds keeps the principal geometry together with nearby text.
+// When the geometry contains no text, retain the text-cluster correction;
+// labels more than ten principal spans away remain excluded as outliers.
 func sheetContentBounds(prims []drawing.Primitive) drawing.Box2 {
 	b := quantileSheetBounds(prims)
 	marks := textMarks(prims)
@@ -1591,13 +1589,24 @@ func sheetContentBounds(prims []drawing.Primitive) drawing.Box2 {
 			inside++
 		}
 	}
-	// 只要框内仍有文本就保持原口径：部分标注出框属于取景取舍，调用方
-	// 可用 RenderOptions.Box 指定精确视口；完全框不住文本（0 条）才是
-	// 密度簇选错簇的硬缺陷，必须切到文字簇。
+	tb := marksBounds(relevant)
+	// Include glyph extents, not just insertion points: long or rotated labels
+	// can cross the viewport even when their anchors are inside it.
+	for _, p := range prims {
+		if p.Kind != 1 || p.Lb.Tx == nil || !drawing.Plausible(p.Lb.X, p.Lb.Y) || boxDistance(p.Lb.X, p.Lb.Y, b) > limit {
+			continue
+		}
+		glyph := drawing.PrimitivesBounds([]drawing.Primitive{p})
+		if !glyph.Invalid() {
+			tb.Extend(glyph.MinX, glyph.MinY)
+			tb.Extend(glyph.MaxX, glyph.MaxY)
+		}
+	}
 	if inside > 0 {
+		b.Extend(tb.MinX, tb.MinY)
+		b.Extend(tb.MaxX, tb.MaxY)
 		return b
 	}
-	tb := marksBounds(relevant)
 	if cluster, found := textClusterBounds(prims, tb); found {
 		return cluster
 	}

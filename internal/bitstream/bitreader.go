@@ -609,7 +609,11 @@ func DecodeCodepage(b []byte, codepage uint16) string {
 	switch codepage {
 	case 0, 1:
 		return string(b)
-	case 30, 2, 11, 12:
+	case 30:
+		if out, err := charmap.Windows1252.NewDecoder().Bytes(b); err == nil {
+			return string(out)
+		}
+	case 2, 11, 12:
 		if out, err := charmap.ISO8859_1.NewDecoder().Bytes(b); err == nil {
 			return string(out)
 		}

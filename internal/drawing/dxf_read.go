@@ -552,7 +552,7 @@ func (st *DxfState) parseBlocks() error {
 			}
 			switch {
 			case inPaperSpace:
-				st.skipSpaceEntity(erec) // 图纸空间布局不参与模型空间渲染
+				st.buildSpaceEntity(erec, 1, h)
 			case inModelSpace:
 				st.buildSpaceEntity(erec, 2, 0)
 			default:
@@ -564,8 +564,7 @@ func (st *DxfState) parseBlocks() error {
 
 // ---- ENTITIES 段与实体构建 ----
 
-// parseEntitiesSpace 顶级实体区：全部按模型空间实体处理（67=1 的图纸
-// 空间实体在 buildEntity 内统一跳过，与既有 DWG 解析口径一致）。
+// parseEntitiesSpace reads both model-space and paper-space entities.
 func (st *DxfState) parseEntitiesSpace() error {
 	for {
 		rec, err := st.readRecord()
@@ -579,12 +578,6 @@ func (st *DxfState) parseEntitiesSpace() error {
 		}
 		st.buildSpaceEntity(rec, 2, 0)
 	}
-}
-
-// skipSpaceEntity 图纸空间实体：仅消费句柄合成器状态，不构建实体。
-func (st *DxfState) skipSpaceEntity(rec *DxfRec) {
-	st.RecordHandle(rec)
-	st.unsupported++
 }
 
 // buildSpaceEntity 构建一个指定空间归属的实体（mode 2=模型空间）。
@@ -621,10 +614,10 @@ var dxfSupportedEntities = map[string]bool{
 // buildEntity 单实体构建主分发：返回 nil 表示该类型不构建（SEQEND 结构
 // 标记按宿主归属或静默跳过、其余未支持类型计数后丢弃）。
 func (st *DxfState) buildEntity(rec *DxfRec, mode uint8, owner uint64) any {
-	// 67=1：图纸空间实体，模型空间渲染不涉及
+	// Preserve paper-space entities for layout text extraction; Classify keeps
+	// them out of model-space rendering.
 	if sp, ok := rec.intVal(67); ok && sp == 1 {
-		st.unsupported++
-		return nil
+		mode = 1
 	}
 	// 结构标记先行处理（不推进合成句柄，避免挤占真实句柄空间）
 	if rec.Typ == "SEQEND" {

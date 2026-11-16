@@ -426,7 +426,7 @@ func (ts *Tessellator) TextLabelWith(x, y, h, rot float64, nChars int, t Xform, 
 	// %% 特殊码显示层翻译：Lines 与 Label.Text 同源应用，保证 PNG 字形
 	// 与 SVG/文本提取口径一致（解码数据保持原样，值级对齐不受影响）
 	for i, line := range tx.Lines {
-		tx.Lines[i] = expandPercentCodes(line)
+		tx.Lines[i] = expandPercentCodes(expandUnicodeEscapes(line))
 	}
 	p := ts.TextLabel(x, y, h, rot, nChars, t, e, kind, "", 0)
 	p.Lb.Handle = e.Common().Handle
