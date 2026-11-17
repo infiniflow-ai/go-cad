@@ -47,6 +47,7 @@ import (
 // Sheet 一个识别出的图框：图名与世界坐标包围盒。
 type Sheet struct {
 	Name       string     // 图名（"图号-图名" > 图号 > 标题栏最大字号文本 > 块名 > "图 N"）
+	Viewport   [4]float64 // Render viewport including owned glyph extents and margin.
 	Box        [4]float64 // 世界坐标 {minX, minY, maxX, maxY}
 	LayoutID   string     // 所属布局 ID（模型空间图框恒为 "model"）
 	Space      SpaceKind  // 坐标空间（模型空间图框恒为 SpaceModel）
@@ -209,13 +210,14 @@ func DetectSheets(doc *drawing.Document) []Sheet {
 }
 
 // DetectSheetsDetailed is DetectSheets with candidate/fallback diagnostics.
-func DetectSheetsDetailed(doc *drawing.Document) SheetDetection {
+func DetectSheetsDetailed(doc *drawing.Document) (out SheetDetection) {
 	if doc == nil {
 		return SheetDetection{}
 	}
 	sd := newSheetDetector(doc)
 	cands := sd.candidates()
-	out := SheetDetection{CandidateCount: len(cands)}
+	out = SheetDetection{CandidateCount: len(cands)}
+	defer func() { sd.setSheetViewports(out.Sheets) }()
 	if len(cands) == 0 {
 		out.Sheets = sd.fallbackWhole()
 		out.Fallback = len(out.Sheets) == 1 && out.Sheets[0].Name == "整图"
@@ -229,7 +231,12 @@ func DetectSheetsDetailed(doc *drawing.Document) SheetDetection {
 		out.Warnings = append(out.Warnings, "图框候选全部被去重，回退整图")
 		return out
 	}
-	kept = sd.expandSheetBounds(kept)
+	if !sd.framesCoverContent(kept) {
+		out.Sheets = sd.fallbackWhole()
+		out.Fallback = true
+		out.Warnings = append(out.Warnings, "图框仅覆盖局部内容，回退整图")
+		return out
+	}
 	sheets := make([]Sheet, 0, len(kept)+2)
 	covered := make([]drawing.Box2, 0, len(kept))
 	for i, c := range kept {
@@ -261,6 +268,94 @@ func DetectSheetsDetailed(doc *drawing.Document) SheetDetection {
 	}
 	out.Sheets = append(sheets, residual...)
 	return out
+}
+
+// framesCoverContent rejects local tables mistaken for the drawing boundary.
+// Both text and area coverage must be low: valid frames can have remote notes.
+func (sd *sheetDetector) framesCoverContent(frames []sheetCand) bool {
+	// Distant residual pages are separate content, not evidence against a frame.
+	var prims []drawing.Primitive
+	for _, p := range sd.modelPrims() {
+		b := drawing.PrimitivesBounds([]drawing.Primitive{p})
+		if b.Invalid() {
+			continue
+		}
+		for _, f := range frames {
+			span := math.Max(f.box.MaxX-f.box.MinX, f.box.MaxY-f.box.MinY)
+			if b.MaxX >= f.box.MinX-10*span && b.MinX <= f.box.MaxX+10*span && b.MaxY >= f.box.MinY-10*span && b.MinY <= f.box.MaxY+10*span {
+				prims = append(prims, p)
+				break
+			}
+		}
+	}
+	whole := drawing.PrimitivesBounds(prims)
+	area := (whole.MaxX - whole.MinX) * (whole.MaxY - whole.MinY)
+	if area <= 0 {
+		return true
+	}
+	total, inside := 0, 0
+	for _, p := range prims {
+		if p.Kind != 1 || p.Lb.Tx == nil {
+			continue
+		}
+		total++
+		for _, f := range frames {
+			if pointInBox(p.Lb.X, p.Lb.Y, f.box) {
+				inside++
+				break
+			}
+		}
+	}
+	// A geometric sheet without text can coexist with a residual notes page.
+	if inside == 0 || total == 0 || float64(inside)/float64(total) >= 0.7 {
+		return true
+	}
+	covered := 0.0
+	for _, f := range frames {
+		w := math.Max(0, math.Min(f.box.MaxX, whole.MaxX)-math.Max(f.box.MinX, whole.MinX))
+		h := math.Max(0, math.Min(f.box.MaxY, whole.MaxY)-math.Max(f.box.MinY, whole.MinY))
+		covered += w * h
+	}
+	return covered/area >= 0.2
+}
+
+// setSheetViewports keeps ownership boxes stable while rendering every glyph
+// anchored in its sheet, even when it overhangs a neighboring frame.
+func (sd *sheetDetector) setSheetViewports(sheets []Sheet) {
+	boxes := make([]drawing.Box2, len(sheets))
+	for i, s := range sheets {
+		boxes[i] = drawing.Box2{MinX: s.Box[0], MinY: s.Box[1], MaxX: s.Box[2], MaxY: s.Box[3]}
+	}
+	for _, p := range sd.modelPrims() {
+		if p.Kind != 1 || p.Lb.Tx == nil {
+			continue
+		}
+		for i, s := range sheets {
+			ownership := drawing.Box2{MinX: s.Box[0], MinY: s.Box[1], MaxX: s.Box[2], MaxY: s.Box[3]}
+			if !pointInBox(p.Lb.X, p.Lb.Y, ownership) {
+				continue
+			}
+			glyph := drawing.PrimitivesBounds([]drawing.Primitive{p})
+			if !glyph.Invalid() {
+				boxes[i].MinX = math.Min(boxes[i].MinX, glyph.MinX)
+				boxes[i].MinY = math.Min(boxes[i].MinY, glyph.MinY)
+				boxes[i].MaxX = math.Max(boxes[i].MaxX, glyph.MaxX)
+				boxes[i].MaxY = math.Max(boxes[i].MaxY, glyph.MaxY)
+			}
+			break
+		}
+	}
+	for i, b := range boxes {
+		sheets[i].Viewport = SheetViewport([4]float64{b.MinX, b.MinY, b.MaxX, b.MaxY})
+	}
+}
+
+func renderSheetViewport(sheet Sheet) drawing.Box2 {
+	v := sheet.Viewport
+	if v[2] > v[0] && v[3] > v[1] {
+		return drawing.Box2{MinX: v[0], MinY: v[1], MaxX: v[2], MaxY: v[3]}
+	}
+	return sheetViewport(sheet.Box)
 }
 
 // sheetTextLike 直属文本样本（图名提取用）。
@@ -771,65 +866,6 @@ func (sd *sheetDetector) modelPrims() []drawing.Primitive {
 	}
 	sd.modelPrimsC = drawing.NewTessellator(sd.doc).ExpandAll()
 	return sd.modelPrimsC
-}
-
-// expandSheetBounds grows each detected frame to include glyph extents of
-// text anchored inside it (legend descriptions and title-block text often
-// overhang the frame line). Expansion is capped at 15% per side and clamped
-// against neighboring sheets so adjacent frames never swallow each other.
-func (sd *sheetDetector) expandSheetBounds(cands []sheetCand) []sheetCand {
-	if len(cands) == 0 {
-		return cands
-	}
-	prims := sd.modelPrims()
-	for i := range cands {
-		b := cands[i].box
-		w, h := b.MaxX-b.MinX, b.MaxY-b.MinY
-		if w <= 0 || h <= 0 {
-			continue
-		}
-		orig := b
-		probe := drawing.Box2{MinX: b.MinX - w*0.02, MinY: b.MinY - h*0.02, MaxX: b.MaxX + w*0.02, MaxY: b.MaxY + h*0.02}
-		for pi := range prims {
-			p := &prims[pi]
-			if p.Kind != 1 || p.Lb.Tx == nil || !pointInBox(p.Lb.X, p.Lb.Y, probe) {
-				continue
-			}
-			gb := drawing.PrimitivesBounds([]drawing.Primitive{*p})
-			if gb.Invalid() {
-				continue
-			}
-			b.MinX = math.Min(b.MinX, gb.MinX)
-			b.MaxX = math.Max(b.MaxX, gb.MaxX)
-			b.MinY = math.Min(b.MinY, gb.MinY)
-			b.MaxY = math.Max(b.MaxY, gb.MaxY)
-		}
-		b = drawing.Box2{
-			MinX: math.Max(b.MinX, orig.MinX-w*0.15),
-			MinY: math.Max(b.MinY, orig.MinY-h*0.15),
-			MaxX: math.Min(b.MaxX, orig.MaxX+w*0.15),
-			MaxY: math.Min(b.MaxY, orig.MaxY+h*0.15),
-		}
-		cands[i].box = b
-	}
-	// Clamp horizontal/vertical overlap introduced by expansion.
-	for i := range cands {
-		for j := range cands {
-			if i == j {
-				continue
-			}
-			a, b := &cands[i].box, cands[j].box
-			if a.MaxX <= b.MinX || a.MinX >= b.MaxX || a.MaxY <= b.MinY || a.MinY >= b.MaxY {
-				continue
-			}
-			if cands[i].box.MinX < cands[j].box.MinX {
-				a.MaxX = math.Min(a.MaxX, b.MinX)
-			} else {
-				a.MinX = math.Max(a.MinX, b.MaxX)
-			}
-		}
-	}
-	return cands
 }
 
 // cornerBox 局部包围盒经仿射变换后的角点外接近似世界包围盒（旋转非
@@ -2178,7 +2214,7 @@ func (sp *sheetPipeline) sheetWidthFor(vp drawing.Box2, sheet Sheet, width int) 
 // 控制，只统计达标率不自动重渲（整图全览张即走该路径不被放大）。
 // 返回 PNG 字节流、最终渲染宽度、文字清晰达标率（0~1）与自动重渲次数。
 func (sp *sheetPipeline) renderPNG(sheet Sheet, opts RenderOptions) ([]byte, int, float64, int, error) {
-	vp := sheetViewport(sheet.Box)
+	vp := renderSheetViewport(sheet)
 	width := sp.sheetWidthFor(vp, sheet, opts.Width)
 	vw := vp.MaxX - vp.MinX
 	data, err := sp.renderPNGAt(vp, width, opts)
@@ -2297,7 +2333,7 @@ func sheetPixelsOK(vp drawing.Box2, width int) bool {
 // 序列化与整图 RenderSVG 同一发射器（文字 text 元素由查看器字体渲染）。
 // SVG 矢量无像素概念，清晰度自检与自动重渲不适用，返回名义宽度。
 func (sp *sheetPipeline) renderSVG(sheet Sheet, opts RenderOptions) ([]byte, int, error) {
-	vp := sheetViewport(sheet.Box)
+	vp := renderSheetViewport(sheet)
 	width := sp.sheetWidthFor(vp, sheet, opts.Width)
 	vw := vp.MaxX - vp.MinX
 	vh := vp.MaxY - vp.MinY
@@ -2444,7 +2480,8 @@ func RenderAllSheets(doc *drawing.Document, opts RenderOptions, format string) (
 		if err != nil {
 			return nil, fmt.Errorf("cad: 渲染图框 %q: %w", s.Name, err)
 		}
-		results = append(results, SheetResult{Name: s.Name, Data: data, Width: width, Viewport: SheetViewport(s.Box), PassRate: rate, Rerenders: rerenders})
+		v := renderSheetViewport(s)
+		results = append(results, SheetResult{Name: s.Name, Data: data, Width: width, Viewport: [4]float64{v.MinX, v.MinY, v.MaxX, v.MaxY}, PassRate: rate, Rerenders: rerenders})
 	}
 	return results, nil
 }
