@@ -46,8 +46,20 @@ import (
 
 // Sheet 一个识别出的图框：图名与世界坐标包围盒。
 type Sheet struct {
-	Name string     // 图名（"图号-图名" > 图号 > 标题栏最大字号文本 > 块名 > "图 N"）
-	Box  [4]float64 // 世界坐标 {minX, minY, maxX, maxY}
+	Name       string     // 图名（"图号-图名" > 图号 > 标题栏最大字号文本 > 块名 > "图 N"）
+	Box        [4]float64 // 世界坐标 {minX, minY, maxX, maxY}
+	LayoutID   string     // 所属布局 ID（模型空间图框恒为 "model"）
+	Space      SpaceKind  // 坐标空间（模型空间图框恒为 SpaceModel）
+	Source     string     // 识别来源：insert / polyline / lines / fallback
+	Confidence float64    // 置信度 0~1（fallback 为 0）
+}
+
+// SheetDetection 图框识别诊断：结果、候选数量与告警。
+type SheetDetection struct {
+	Sheets         []Sheet
+	Fallback       bool
+	CandidateCount int
+	Warnings       []string
 }
 
 // SheetResult 批量渲染的单张结果。
@@ -193,35 +205,62 @@ const (
 // 残余内容网格密度聚类产出补充 Sheet，名字与标准框可区分（最大字号
 // 文本或"补充区域 N"）。
 func DetectSheets(doc *drawing.Document) []Sheet {
+	return DetectSheetsDetailed(doc).Sheets
+}
+
+// DetectSheetsDetailed is DetectSheets with candidate/fallback diagnostics.
+func DetectSheetsDetailed(doc *drawing.Document) SheetDetection {
 	if doc == nil {
-		return nil
+		return SheetDetection{}
 	}
 	sd := newSheetDetector(doc)
 	cands := sd.candidates()
+	out := SheetDetection{CandidateCount: len(cands)}
 	if len(cands) == 0 {
-		return sd.fallbackWhole()
+		out.Sheets = sd.fallbackWhole()
+		out.Fallback = len(out.Sheets) == 1 && out.Sheets[0].Name == "整图"
+		out.Warnings = append(out.Warnings, "未识别到图框候选，回退整图")
+		return out
 	}
 	kept := dedupSheets(cands)
 	if len(kept) == 0 {
-		return sd.fallbackWhole()
+		out.Sheets = sd.fallbackWhole()
+		out.Fallback = len(out.Sheets) == 1 && out.Sheets[0].Name == "整图"
+		out.Warnings = append(out.Warnings, "图框候选全部被去重，回退整图")
+		return out
 	}
+	kept = sd.expandSheetBounds(kept)
 	sheets := make([]Sheet, 0, len(kept)+2)
 	covered := make([]drawing.Box2, 0, len(kept))
 	for i, c := range kept {
-		name := sd.sheetTitle(c)
+		name := c.name
 		if name == "" {
+			name = sd.sheetTitle(c)
+		}
+		if name == "" && c.ins != nil {
 			name = sd.blockName(c.ins.BlockHeader)
 		}
 		if name == "" {
 			name = fmt.Sprintf("图 %d", i+1)
 		}
 		sheets = append(sheets, Sheet{
-			Name: name,
-			Box:  [4]float64{c.box.MinX, c.box.MinY, c.box.MaxX, c.box.MaxY},
+			Name:       name,
+			Box:        [4]float64{c.box.MinX, c.box.MinY, c.box.MaxX, c.box.MaxY},
+			LayoutID:   "model",
+			Space:      SpaceModel,
+			Source:     c.source,
+			Confidence: c.confidence,
 		})
 		covered = append(covered, c.box)
 	}
-	return append(sheets, sd.residualSheets(covered)...)
+	residual := sd.residualSheets(covered)
+	for i := range residual {
+		residual[i].LayoutID = "model"
+		residual[i].Space = SpaceModel
+		residual[i].Source = "residual"
+	}
+	out.Sheets = append(sheets, residual...)
+	return out
 }
 
 // sheetTextLike 直属文本样本（图名提取用）。
@@ -242,6 +281,7 @@ type sheetDetector struct {
 	modelTexts  []sheetTextLike                           // 模型空间直属文本（图名提取第二来源）
 	dots        [][2]float64                              // 模型空间直属实体代表点（内容密度与残余聚类共用）
 	dotText     map[[2]float64]struct{}                   // dots 中文本插入点集合（文字页/符号区判别）
+	modelPrimsC []drawing.Primitive                       // 完整模型空间展开（几何候选/扩框用）
 }
 
 // newSheetDetector 构造检测器：buildVertexIndex 一次供全部块展开共用
@@ -289,8 +329,11 @@ func textDotSet(doc *drawing.Document) map[[2]float64]struct{} {
 
 // sheetCand 通过粗筛的图框候选。
 type sheetCand struct {
-	ins *entity.EntInsert // 图框块参照
-	box drawing.Box2      // 精确世界包围盒（AABB，含旋转外扩）
+	ins        *entity.EntInsert // 图框块参照（几何候选为 nil）
+	box        drawing.Box2      // 精确世界包围盒（AABB，含旋转外扩）
+	name       string            // 几何候选预提取图名（空=后续 sheetTitle 提取）
+	source     string            // insert / polyline / lines
+	confidence float64
 }
 
 // contentDots 模型空间直属实体的代表点样本（内容密度判定用）：
@@ -401,8 +444,19 @@ func (sd *sheetDetector) candidates() []sheetCand {
 		}
 		// 标准比例窗单图框即可入选；加长图幅（粗筛 ratio 已 ≤LongMax）
 		// 必须网格排列（平铺多张图强信号）防加长内容块误纳
-		if !ratioOKA && !gridAligned(g.boxes) {
+		grid := gridAligned(g.boxes)
+		if !ratioOKA && !grid {
 			continue
+		}
+		conf := 0.7
+		if ratioOKA {
+			conf = 0.85
+		}
+		if grid {
+			conf += 0.1
+			if conf > 0.98 {
+				conf = 0.98
+			}
 		}
 		// 内容密度（块级通过率）：图框每一张都容纳图内容；设备外形框
 		// 只有个别实例碰巧落在标注密集区（如 28 个实例仅 2 个框内有点），
@@ -424,9 +478,10 @@ func (sd *sheetDetector) candidates() []sheetCand {
 			if boxes[i].Invalid() || counts[i] < sheetMinContentDots {
 				continue
 			}
-			cands = append(cands, sheetCand{ins: ins, box: boxes[i]})
+			cands = append(cands, sheetCand{ins: ins, box: boxes[i], source: "insert", confidence: conf})
 		}
 	}
+	cands = append(cands, sd.geometryCandidates()...)
 	return cands
 }
 
@@ -440,6 +495,341 @@ func countDotsIn(dots [][2]float64, b drawing.Box2) int {
 		}
 	}
 	return n
+}
+
+// geometryCandidates detects sheet frames drawn as plain LWPOLYLINE or LINE
+// rectangles in model space. This covers real-world drawings whose frames are
+// not INSERT blocks (Flow/Equipment/Pressure/Project_UAS corpus cases).
+func (sd *sheetDetector) geometryCandidates() []sheetCand {
+	rects := polylineRects(sd.doc.ModelSpace)
+	rects = append(rects, lineRects(sd.doc.ModelSpace)...)
+	if len(rects) == 0 {
+		return nil
+	}
+	minX, minY := math.Inf(1), math.Inf(1)
+	maxX, maxY := math.Inf(-1), math.Inf(-1)
+	for _, d := range sd.dots {
+		if d[0] < minX {
+			minX = d[0]
+		}
+		if d[0] > maxX {
+			maxX = d[0]
+		}
+		if d[1] < minY {
+			minY = d[1]
+		}
+		if d[1] > maxY {
+			maxY = d[1]
+		}
+	}
+	span := math.Max(maxX-minX, maxY-minY)
+	if !drawing.Plausible(span, span) || span <= 0 {
+		span = 1
+	}
+	minSide := math.Max(100, span*0.05)
+	var out []sheetCand
+	seen := make(map[[4]float64]bool, len(rects))
+	for _, rect := range rects {
+		w, h := rect.MaxX-rect.MinX, rect.MaxY-rect.MinY
+		if w <= 0 || h <= 0 || math.Min(w, h) < minSide {
+			continue
+		}
+		ratio := math.Max(w, h) / math.Min(w, h)
+		if ratio < sheetRatioMin || ratio > sheetRatioLongMax {
+			continue
+		}
+		if countDotsIn(sd.dots, rect) < sheetMinContentDots {
+			continue
+		}
+		key := [4]float64{rect.MinX, rect.MinY, rect.MaxX, rect.MaxY}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		source := "lines"
+		if len(rects) > 0 {
+			source = rectSource(sd.doc.ModelSpace, rect)
+		}
+		support := geometryGridSupport(rect, rects)
+		ratioOK := ratio <= sheetRatioMax
+		name := sd.geometryTitle(rect)
+		// Long-ratio and untitled geometric frames need a second signal:
+		// a row/column-aligned peer. This rejects room outlines and large
+		// furniture blocks while keeping tiled extended sheets.
+		if !ratioOK && !support {
+			continue
+		}
+		if name == "" && !support {
+			continue
+		}
+		conf := 0.62
+		if source == "polyline" {
+			conf += 0.08
+		}
+		if support {
+			conf += 0.12
+		}
+		if name != "" {
+			conf += 0.1
+		}
+		if conf > 0.95 {
+			conf = 0.95
+		}
+		out = append(out, sheetCand{box: rect, name: name, source: source, confidence: conf})
+	}
+	return out
+}
+
+// rectSource determines whether a rectangle is covered by a single LWPOLYLINE
+// (stronger signal) or only by LINE segments.
+func rectSource(ents []any, rect drawing.Box2) string {
+	for _, ent := range ents {
+		p, ok := ent.(*entity.EntLwPolyline)
+		if !ok {
+			continue
+		}
+		if b, ok := lwPolylineRect(p); ok && nearBox(b, rect) {
+			return "polyline"
+		}
+	}
+	return "lines"
+}
+
+func nearBox(a, b drawing.Box2) bool {
+	tol := math.Max(a.MaxX-a.MinX, a.MaxY-a.MinY) * 1e-6
+	if tol <= 0 {
+		tol = 1e-6
+	}
+	return math.Abs(a.MinX-b.MinX) <= tol && math.Abs(a.MinY-b.MinY) <= tol &&
+		math.Abs(a.MaxX-b.MaxX) <= tol && math.Abs(a.MaxY-b.MaxY) <= tol
+}
+
+// polylineRects extracts axis-aligned rectangles from 4-corner LWPOLYLINEs.
+// A closing vertex is optional; many drawings use four points without the
+// closed flag but still draw a complete frame through a separate edge.
+func polylineRects(ents []any) []drawing.Box2 {
+	var out []drawing.Box2
+	for _, ent := range ents {
+		p, ok := ent.(*entity.EntLwPolyline)
+		if !ok {
+			continue
+		}
+		if b, ok := lwPolylineRect(p); ok {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func lwPolylineRect(p *entity.EntLwPolyline) (drawing.Box2, bool) {
+	vs := p.Vertices
+	if len(vs) == 5 && math.Abs(vs[0].X-vs[4].X) < 1e-9 && math.Abs(vs[0].Y-vs[4].Y) < 1e-9 {
+		vs = vs[:4]
+	}
+	if len(vs) != 4 {
+		return drawing.Box2{}, false
+	}
+	minX, maxX, minY, maxY := vs[0].X, vs[0].X, vs[0].Y, vs[0].Y
+	for _, v := range vs[1:] {
+		if v.X < minX {
+			minX = v.X
+		}
+		if v.X > maxX {
+			maxX = v.X
+		}
+		if v.Y < minY {
+			minY = v.Y
+		}
+		if v.Y > maxY {
+			maxY = v.Y
+		}
+	}
+	w, h := maxX-minX, maxY-minY
+	if w <= 0 || h <= 0 {
+		return drawing.Box2{}, false
+	}
+	tol := math.Max(w, h) * 1e-6
+	for _, v := range vs {
+		onX := math.Abs(v.X-minX) <= tol || math.Abs(v.X-maxX) <= tol
+		onY := math.Abs(v.Y-minY) <= tol || math.Abs(v.Y-maxY) <= tol
+		if !onX || !onY {
+			return drawing.Box2{}, false
+		}
+	}
+	return drawing.Box2{MinX: minX, MinY: minY, MaxX: maxX, MaxY: maxY}, true
+}
+
+// lineRects finds rectangles formed by pairs of horizontal LINEs with matching
+// endpoints and vertical LINEs at both ends.
+type frameLineSeg struct{ x1, y1, x2, y2 float64 }
+
+func lineRects(ents []any) []drawing.Box2 {
+	var hs, vs []frameLineSeg
+	for _, ent := range ents {
+		l, ok := ent.(*entity.EntLine)
+		if !ok {
+			continue
+		}
+		dx, dy := math.Abs(l.End.X-l.Start.X), math.Abs(l.End.Y-l.Start.Y)
+		length := math.Hypot(dx, dy)
+		if length < 50 {
+			continue
+		}
+		if dy <= math.Max(1e-6, dx*0.005) {
+			if l.Start.X <= l.End.X {
+				hs = append(hs, frameLineSeg{l.Start.X, l.Start.Y, l.End.X, l.End.Y})
+			} else {
+				hs = append(hs, frameLineSeg{l.End.X, l.End.Y, l.Start.X, l.Start.Y})
+			}
+		} else if dx <= math.Max(1e-6, dy*0.005) {
+			if l.Start.Y <= l.End.Y {
+				vs = append(vs, frameLineSeg{l.Start.X, l.Start.Y, l.End.X, l.End.Y})
+			} else {
+				vs = append(vs, frameLineSeg{l.End.X, l.End.Y, l.Start.X, l.Start.Y})
+			}
+		}
+	}
+	if len(hs) < 2 || len(vs) < 2 {
+		return nil
+	}
+	tolX := 1e-6
+	tolY := 1e-6
+	for _, s := range append(append([]frameLineSeg{}, hs...), vs...) {
+		tolX = math.Max(tolX, math.Abs(s.x1)*1e-9)
+		tolY = math.Max(tolY, math.Abs(s.y1)*1e-9)
+	}
+	var out []drawing.Box2
+	const maxRects = 512
+	for i := 0; i < len(hs) && len(out) < maxRects; i++ {
+		a := hs[i]
+		for j := i + 1; j < len(hs); j++ {
+			b := hs[j]
+			if math.Abs(a.y1-b.y1) <= tolY {
+				continue
+			}
+			if math.Abs(a.x1-b.x1) > tolX || math.Abs(a.x2-b.x2) > tolX {
+				continue
+			}
+			yLow, yHigh := math.Min(a.y1, b.y1), math.Max(a.y1, b.y1)
+			if yHigh-yLow < 50 {
+				continue
+			}
+			if !hasVertical(vs, a.x1, yLow, yHigh, tolX, tolY) || !hasVertical(vs, a.x2, yLow, yHigh, tolX, tolY) {
+				continue
+			}
+			rect := drawing.Box2{MinX: a.x1, MinY: yLow, MaxX: a.x2, MaxY: yHigh}
+			if rect.MaxX-rect.MinX <= 0 {
+				continue
+			}
+			out = append(out, rect)
+			if len(out) >= maxRects {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+func hasVertical(vs []frameLineSeg, x, yLow, yHigh, tolX, tolY float64) bool {
+	for _, v := range vs {
+		if math.Abs(v.x1-x) <= tolX && v.y1 <= yLow+tolY && v.y2 >= yHigh-tolY {
+			return true
+		}
+	}
+	return false
+}
+
+// geometryGridSupport reports whether another geometry rectangle of similar
+// size is row/column aligned with b.
+func geometryGridSupport(b drawing.Box2, rects []drawing.Box2) bool {
+	w, h := b.MaxX-b.MinX, b.MaxY-b.MinY
+	for _, o := range rects {
+		if nearBox(b, o) {
+			continue
+		}
+		ow, oh := o.MaxX-o.MinX, o.MaxY-o.MinY
+		if math.Abs(ow-w) > w*0.05 || math.Abs(oh-h) > h*0.05 {
+			continue
+		}
+		if math.Abs(o.MinX-b.MinX) <= w*0.02 || math.Abs(o.MinY-b.MinY) <= h*0.02 {
+			return true
+		}
+	}
+	return false
+}
+
+// geometryTitle extracts the largest title-area text for a geometric frame.
+func (sd *sheetDetector) geometryTitle(b drawing.Box2) string {
+	return sd.sheetTitleFrom(b, nil)
+}
+
+// modelPrims returns the fully expanded model-space primitives, cached for
+// title extraction and bounds expansion.
+func (sd *sheetDetector) modelPrims() []drawing.Primitive {
+	if sd.modelPrimsC != nil {
+		return sd.modelPrimsC
+	}
+	sd.modelPrimsC = drawing.NewTessellator(sd.doc).ExpandAll()
+	return sd.modelPrimsC
+}
+
+// expandSheetBounds grows each detected frame to include glyph extents of
+// text anchored inside it (legend descriptions and title-block text often
+// overhang the frame line). Expansion is capped at 15% per side and clamped
+// against neighboring sheets so adjacent frames never swallow each other.
+func (sd *sheetDetector) expandSheetBounds(cands []sheetCand) []sheetCand {
+	if len(cands) == 0 {
+		return cands
+	}
+	prims := sd.modelPrims()
+	for i := range cands {
+		b := cands[i].box
+		w, h := b.MaxX-b.MinX, b.MaxY-b.MinY
+		if w <= 0 || h <= 0 {
+			continue
+		}
+		orig := b
+		probe := drawing.Box2{MinX: b.MinX - w*0.02, MinY: b.MinY - h*0.02, MaxX: b.MaxX + w*0.02, MaxY: b.MaxY + h*0.02}
+		for pi := range prims {
+			p := &prims[pi]
+			if p.Kind != 1 || p.Lb.Tx == nil || !pointInBox(p.Lb.X, p.Lb.Y, probe) {
+				continue
+			}
+			gb := drawing.PrimitivesBounds([]drawing.Primitive{*p})
+			if gb.Invalid() {
+				continue
+			}
+			b.MinX = math.Min(b.MinX, gb.MinX)
+			b.MaxX = math.Max(b.MaxX, gb.MaxX)
+			b.MinY = math.Min(b.MinY, gb.MinY)
+			b.MaxY = math.Max(b.MaxY, gb.MaxY)
+		}
+		b = drawing.Box2{
+			MinX: math.Max(b.MinX, orig.MinX-w*0.15),
+			MinY: math.Max(b.MinY, orig.MinY-h*0.15),
+			MaxX: math.Min(b.MaxX, orig.MaxX+w*0.15),
+			MaxY: math.Min(b.MaxY, orig.MaxY+h*0.15),
+		}
+		cands[i].box = b
+	}
+	// Clamp horizontal/vertical overlap introduced by expansion.
+	for i := range cands {
+		for j := range cands {
+			if i == j {
+				continue
+			}
+			a, b := &cands[i].box, cands[j].box
+			if a.MaxX <= b.MinX || a.MinX >= b.MaxX || a.MaxY <= b.MinY || a.MinY >= b.MaxY {
+				continue
+			}
+			if cands[i].box.MinX < cands[j].box.MinX {
+				a.MaxX = math.Min(a.MaxX, b.MinX)
+			} else {
+				a.MinX = math.Max(a.MinX, b.MaxX)
+			}
+		}
+	}
+	return cands
 }
 
 // cornerBox 局部包围盒经仿射变换后的角点外接近似世界包围盒（旋转非
@@ -715,14 +1105,26 @@ func sheetOverlapArea(a, b drawing.Box2) float64 {
 // 与模型空间直属文本（画完图框后直接标注的标题栏文字），跨来源统一
 // 处理。世界字高 = 展开推进基向量长度 × 字高（块内局部），跨嵌套块可比。
 func (sd *sheetDetector) sheetTitle(c sheetCand) string {
-	prims := sd.expandInsert(c.ins)
-	tw := (c.box.MaxX - c.box.MinX) * 0.25
-	th := (c.box.MaxY - c.box.MinY) / 6
-	x0 := c.box.MaxX - tw
-	y0 := c.box.MinY
-	y1 := c.box.MinY + th
+	if c.name != "" {
+		return c.name
+	}
+	var prims []drawing.Primitive
+	if c.ins != nil {
+		prims = sd.expandInsert(c.ins)
+	}
+	return sd.sheetTitleFrom(c.box, prims)
+}
+
+// sheetTitleFrom extracts a sheet name from title-block text. prims may be nil
+// for geometric frames, in which case only direct model text is used.
+func (sd *sheetDetector) sheetTitleFrom(box drawing.Box2, prims []drawing.Primitive) string {
+	tw := (box.MaxX - box.MinX) * 0.25
+	th := (box.MaxY - box.MinY) / 6
+	x0 := box.MaxX - tw
+	y0 := box.MinY
+	y1 := box.MinY + th
 	inTitle := func(x, y float64) bool {
-		return drawing.Plausible(x, y) && x >= x0 && x <= c.box.MaxX && y >= y0 && y <= y1
+		return drawing.Plausible(x, y) && x >= x0 && x <= box.MaxX && y >= y0 && y <= y1
 	}
 	var inTexts, allTexts []sheetTextLike
 	add := func(x, y, hWorld float64, text string) {
@@ -745,7 +1147,7 @@ func (sd *sheetDetector) sheetTitle(c sheetCand) string {
 	for _, t := range sd.modelTexts {
 		add(t.X, t.y, t.hWorld, t.text)
 	}
-	if no := pickSheetNo(inTexts, c.box); no != nil {
+	if no := pickSheetNo(inTexts, box); no != nil {
 		if name := sheetNameNear(no, allTexts); name != "" {
 			return no.text + "-" + name
 		}
@@ -881,8 +1283,12 @@ func (sd *sheetDetector) fallbackWhole() []Sheet {
 		bbox = drawing.Box2{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
 	}
 	return []Sheet{{
-		Name: "整图",
-		Box:  [4]float64{bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY},
+		Name:       "整图",
+		Box:        [4]float64{bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY},
+		LayoutID:   "model",
+		Space:      SpaceModel,
+		Source:     "fallback",
+		Confidence: 0,
 	}}
 }
 
@@ -2005,7 +2411,13 @@ func RenderAllSheets(doc *drawing.Document, opts RenderOptions, format string) (
 	sp := prepareSheets(doc)
 	if len(sheets) != 1 || sheets[0].Name != "整图" {
 		if b := sheetContentBounds(sp.prims); !b.Invalid() {
-			sheets = append([]Sheet{{Name: "整图全览", Box: [4]float64{b.MinX, b.MinY, b.MaxX, b.MaxY}}}, sheets...)
+			sheets = append([]Sheet{{
+				Name:     "整图全览",
+				Box:      [4]float64{b.MinX, b.MinY, b.MaxX, b.MaxY},
+				LayoutID: "model",
+				Space:    SpaceModel,
+				Source:   "overview",
+			}}, sheets...)
 		}
 	}
 	results := make([]SheetResult, 0, len(sheets))

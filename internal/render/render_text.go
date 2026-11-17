@@ -487,6 +487,9 @@ func (tr *textRenderer) warpMask(mask *image.Gray, cx, cy, ax, ay, bx, by float6
 		}
 	}
 	bounds := tr.cv.img.Bounds()
+	if tr.cv.clip != nil {
+		bounds = bounds.Intersect(*tr.cv.clip)
+	}
 	px0, py0 := int(math.Floor(minX))-1, int(math.Floor(minY))-1
 	px1, py1 := int(math.Ceil(maxX))+1, int(math.Ceil(maxY))+1
 	if px0 < bounds.Min.X {

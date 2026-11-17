@@ -105,7 +105,13 @@ type canvas struct {
 	lineWidth     float64       // 默认线宽（像素，随渲染宽度自适应，见 adaptiveLineWidth）
 	fontPath      string        // 字形渲染字体路径（空=自动探测系统字体）
 	tr            *textRenderer // 文本渲染器（首次画文本懒初始化，单协程使用）
+	// clip 可选像素裁剪矩形（paper-space VIEWPORT 合成用）：nil = 整幅画布。
+	// 只影响绘制，不参与世界→像素映射。
+	clip *image.Rectangle
 }
+
+// setClip 设置像素裁剪区（nil 清除）。
+func (c *canvas) setClip(r *image.Rectangle) { c.clip = r }
 
 // adaptiveLineWidth 默认线宽随渲染宽度自适应：2048 宽保持历史口径 0.75px
 // 笔刷半径，更大宽度按比例放大（4096 → 1.5px、8192 → 3px），避免高分辨率
@@ -215,6 +221,15 @@ func (c *canvas) drawPixelLine(x1, y1, x2, y2 float64, col color.RGBA) {
 	// 免每像素开方（笔刷判定是逐像素热循环，pprof archHypot ~5%）
 	limit2 := brush * brush
 	bDx, bDy := c.img.Bounds().Dx(), c.img.Bounds().Dy()
+	// 像素裁剪区（paper-space VIEWPORT 合成）：默认整幅画布。
+	xMin, xMax, yMin, yMax := 0, bDx-1, 0, bDy-1
+	if c.clip != nil {
+		cr := c.clip.Intersect(c.img.Bounds())
+		if cr.Empty() {
+			return
+		}
+		xMin, xMax, yMin, yMax = cr.Min.X, cr.Max.X-1, cr.Min.Y, cr.Max.Y-1
+	}
 	// 参数化裁剪到画布外扩 1 像素的范围，离群长线段不逐像素推进
 	t0, t1 := 0.0, 1.0
 	dx, dy := x2-x1, y2-y1
@@ -261,16 +276,22 @@ func (c *canvas) drawPixelLine(x1, y1, x2, y2 float64, col color.RGBA) {
 		cx, cy := sx+(ex-sx)*t, sy+(ey-sy)*t
 		x0, xEnd := int(cx-brush), int(cx+brush)
 		y0, yEnd := int(cy-brush), int(cy+brush)
+		if x0 < xMin {
+			x0 = xMin
+		}
+		if xEnd > xMax {
+			xEnd = xMax
+		}
+		if y0 < yMin {
+			y0 = yMin
+		}
+		if yEnd > yMax {
+			yEnd = yMax
+		}
 		for py := y0; py <= yEnd; py++ {
-			if py < 0 || py >= bDy {
-				continue
-			}
 			dyPix := float64(py) + 0.5 - cy
 			dy2 := dyPix * dyPix
 			for px := x0; px <= xEnd; px++ {
-				if px < 0 || px >= bDx {
-					continue
-				}
 				dxPix := float64(px) + 0.5 - cx
 				if dxPix*dxPix+dy2 <= limit2 {
 					c.img.SetRGBA(px, py, col)

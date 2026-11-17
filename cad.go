@@ -39,6 +39,23 @@ type SheetResult = render.SheetResult
 // SheetText 单条图纸文本及其图框归属（docling 集成的文本导出单元）。
 type SheetText = render.SheetText
 
+// SpaceKind 布局坐标空间：model / paper。
+type SpaceKind = render.SpaceKind
+
+const (
+	SpaceModel = render.SpaceModel
+	SpacePaper = render.SpacePaper
+)
+
+// LayoutViewport 图纸布局中的 VIEWPORT 描述（paper 坐标）。
+type LayoutViewport = render.LayoutViewport
+
+// Layout 一个可渲染布局：模型空间或图纸空间。
+type Layout = render.Layout
+
+// LayoutResult 单布局/布局区域的渲染产出（含实际 viewport）。
+type LayoutResult = render.LayoutResult
+
 // RenderPNG 将文档渲染为 PNG 字节流。
 func RenderPNG(doc *Document, opts RenderOptions) ([]byte, error) {
 	return render.RenderPNG(doc, opts)
@@ -66,6 +83,12 @@ func RenderAllSheets(doc *Document, opts RenderOptions, format string) ([]SheetR
 
 // DetectSheets 检测图纸分幅（图框识别）。
 func DetectSheets(doc *Document) []Sheet { return render.DetectSheets(doc) }
+
+// SheetDetection 图框识别结果与诊断信息。
+type SheetDetection = render.SheetDetection
+
+// DetectSheetsDetailed 检测图纸分幅并返回候选数/回退原因等诊断。
+func DetectSheetsDetailed(doc *Document) SheetDetection { return render.DetectSheetsDetailed(doc) }
 
 // SheetTexts 收集图纸全部文本并按图框归属（docling 集成入口）：内部先
 // DetectSheets 识别图框再逐条归属，Sheet 为 1-based 图框序号、0 表示不在
@@ -158,3 +181,20 @@ type TextLayout = render.TextLayout
 
 // TextLayouts extracts model and paper-space text without mixing their coordinates.
 func TextLayouts(doc *Document) []TextLayout { return render.TextLayouts(doc) }
+
+// Layouts enumerates the model layout and all paper-space layouts.
+func Layouts(doc *Document) []Layout { return render.Layouts(doc) }
+
+// LayoutByID returns one layout by its stable ID.
+func LayoutByID(doc *Document, id string) (Layout, bool) { return render.LayoutByID(doc, id) }
+
+// RenderLayoutPNG renders one layout (paper layouts compose VIEWPORT content).
+func RenderLayoutPNG(doc *Document, layoutID string, opts RenderOptions) (LayoutResult, error) {
+	return render.RenderLayoutPNG(doc, layoutID, opts)
+}
+
+// RenderLayoutBoxPNG renders a native-coordinate region of one layout and
+// returns the actual viewport used for pixel mapping.
+func RenderLayoutBoxPNG(doc *Document, layoutID string, box [4]float64, opts RenderOptions) (LayoutResult, error) {
+	return render.RenderLayoutBoxPNG(doc, layoutID, box, opts)
+}
